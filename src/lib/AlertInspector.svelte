@@ -1,52 +1,51 @@
-
 <script lang="ts">
   import {
-    getFranklinAlerts,
+    getCommuterRailAlerts,
     type MBTAAlert,
-    type MBTAAlertPeriod
-  } from '#lib/api/alerts.ts';
+    type MBTAAlertPeriod,
+  } from "#lib/api/alerts.ts";
 
+  import {
+    getAffectedCommuteEndpoints,
+    getExplicitAlertTripIds,
+    getCompatibleAlertEntities,
+    getMatchingJourneyStopIds,
+  } from "#lib/service-disruptions.ts";
 
-
-
-import {
-  getAffectedCommuteEndpoints,
-  getExplicitAlertTripIds,
-  getCompatibleAlertEntities,
-  getMatchingJourneyStopIds
-} from '#lib/service-disruptions.ts';
-
-
-
+  let {
+    routeId,
+  }: {
+    routeId: string;
+  } = $props();
 
   let alerts = $state<MBTAAlert[]>([]);
   let loading = $state(false);
-  let errorMessage = $state('');
+  let errorMessage = $state("");
   let hasResults = $state(false);
-  let inspectedAt = $state('');
+  let inspectedAt = $state("");
 
   /**
    * Format an MBTA timestamp in Eastern Time.
    */
   function formatTime(timestamp: string | null): string {
     if (!timestamp) {
-      return 'No time supplied';
+      return "No time supplied";
     }
 
     const date = new Date(timestamp);
 
     if (!Number.isFinite(date.getTime())) {
-      return 'Invalid timestamp';
+      return "Invalid timestamp";
     }
 
-    return new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York',
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
     }).format(date);
   }
 
@@ -56,10 +55,7 @@ import {
    * This does not establish whether the alert
    * affects a specific train or station.
    */
-  function periodIncludesNow(
-    period: MBTAAlertPeriod,
-    now: number
-  ): boolean {
+  function periodIncludesNow(period: MBTAAlertPeriod, now: number): boolean {
     const start = period.start
       ? new Date(period.start).getTime()
       : Number.NEGATIVE_INFINITY;
@@ -69,18 +65,15 @@ import {
       : Number.POSITIVE_INFINITY;
 
     return (
-      !Number.isNaN(start) &&
-      !Number.isNaN(end) &&
-      start <= now &&
-      now < end
+      !Number.isNaN(start) && !Number.isNaN(end) && start <= now && now < end
     );
   }
 
   function isActiveNow(alert: MBTAAlert): boolean {
     const now = Date.now();
 
-    return (alert.attributes.active_period ?? []).some(
-      (period) => periodIncludesNow(period, now)
+    return (alert.attributes.active_period ?? []).some((period) =>
+      periodIncludesNow(period, now),
     );
   }
 
@@ -90,119 +83,108 @@ import {
     }
 
     loading = true;
-    errorMessage = '';
+    errorMessage = "";
     hasResults = false;
     alerts = [];
 
     try {
-      const results = await getFranklinAlerts();
+      const results = await getCommuterRailAlerts(routeId);
 
       alerts = results;
       inspectedAt = new Date().toISOString();
       hasResults = true;
 
-      console.log('Franklin Line alert records:', results);
-      
+      console.log('Commuter rail alerts for', routeId, results);
 
-console.table(
-  alerts.map((alert) => {
-    const tripIds = getExplicitAlertTripIds(alert);
+      console.table(
+        alerts.map((alert) => {
+          const tripIds = getExplicitAlertTripIds(alert);
 
-    return {
-      alertId: alert.id,
-      effect: alert.attributes.effect,
-      lifecycle: alert.attributes.lifecycle,
-      matchedEndpoints:
-        getAffectedCommuteEndpoints(alert).join(', ') ||
-        '(none)',
-      explicitTripCount: tripIds.length,
-      explicitTripIds: tripIds.join(', ') || '(none)'
-    };
-  })
-);
+          return {
+            alertId: alert.id,
+            effect: alert.attributes.effect,
+            lifecycle: alert.attributes.lifecycle,
+            matchedEndpoints:
+              getAffectedCommuteEndpoints(alert).join(", ") || "(none)",
+            explicitTripCount: tripIds.length,
+            explicitTripIds: tripIds.join(", ") || "(none)",
+          };
+        }),
+      );
 
-const shuttleAlert = alerts.find(
-  (alert) => alert.id === '1043404'
-);
+      const shuttleAlert = alerts.find((alert) => alert.id === "1043404");
 
-const journeyStopIds = new Set([
-  'place-sstat',
-  'NEC-2287',
-  'place-FB-0148',
-  'FB-0148-01',
-  'FB-0148-02'
-]);
+      const journeyStopIds = new Set([
+        "place-sstat",
+        "NEC-2287",
+        "place-FB-0148",
+        "FB-0148-01",
+        "FB-0148-02",
+      ]);
 
-const alertIdsToTest = [
-  '1030825',
-  '1043404'
-];
+      const alertIdsToTest = ["1030825", "1043404"];
 
-console.table(
-  alertIdsToTest.map((alertId) => {
-    const alert = alerts.find(
-      (item) => item.id === alertId
-    );
+      console.table(
+        alertIdsToTest.map((alertId) => {
+          const alert = alerts.find((item) => item.id === alertId);
 
-    if (!alert) {
-      return {
-        alertId,
-        direction: 'Not available',
-        matchedStops: '(alert not returned)'
-      };
-    }
+          if (!alert) {
+            return {
+              alertId,
+              direction: "Not available",
+              matchedStops: "(alert not returned)",
+            };
+          }
 
-    return {
-      alertId,
-      direction: 'Outbound (0)',
-      matchedStops:
-        getMatchingJourneyStopIds(
-          alert,
-          'test-franklin-trip',
+          return {
+            alertId,
+            direction: "Outbound (0)",
+            matchedStops:
+              getMatchingJourneyStopIds(
+                alert,
+                "test-franklin-trip",
+                0,
+                journeyStopIds,
+              ).join(", ") || "(none)",
+          };
+        }),
+      );
+
+      if (shuttleAlert) {
+        const testTripId = "test-franklin-trip";
+
+        const outboundEntities = getCompatibleAlertEntities(
+          shuttleAlert,
+          testTripId,
           0,
-          journeyStopIds
-        ).join(', ') || '(none)'
-    };
-  })
-);
+        );
 
-if (shuttleAlert) {
-  const testTripId = 'test-franklin-trip';
+        const inboundEntities = getCompatibleAlertEntities(
+          shuttleAlert,
+          testTripId,
+          1,
+        );
 
-  const outboundEntities = getCompatibleAlertEntities(
-    shuttleAlert,
-    testTripId,
-    0
-  );
-
-  const inboundEntities = getCompatibleAlertEntities(
-    shuttleAlert,
-    testTripId,
-    1
-  );
-
-  console.table([
-    {
-      direction: 'Outbound',
-      directionId: 0,
-      compatibleEntities: outboundEntities.length
-    },
-    {
-      direction: 'Inbound',
-      directionId: 1,
-      compatibleEntities: inboundEntities.length
-    }
-  ]);
-}
-
-
+        console.table([
+          {
+            direction: "Outbound",
+            directionId: 0,
+            compatibleEntities: outboundEntities.length,
+          },
+          {
+            direction: "Inbound",
+            directionId: 1,
+            compatibleEntities: inboundEntities.length,
+          },
+        ]);
+      }
     } catch (error) {
-      console.error('MBTA alert inspection failed:', error);
+      console.error("MBTA alert inspection failed:", error);
 
       errorMessage =
         error instanceof Error
           ? error.message
-          : 'Unable to retrieve service alerts.';
+          : "Unable to retrieve service alerts.";
     } finally {
       loading = false;
     }
@@ -212,17 +194,10 @@ if (shuttleAlert) {
 <section class="inspector">
   <h2>Service Alert Inspector</h2>
 
-  <p>
-    Temporary diagnostic tool for Franklin/Foxboro
-    Line service alerts.
-  </p>
+  <p>Temporary diagnostic tool for Franklin/Foxboro Line service alerts.</p>
 
-  <button
-    type="button"
-    onclick={inspectAlerts}
-    disabled={loading}
-  >
-    {loading ? 'Retrieving alerts...' : 'Inspect Service Alerts'}
+  <button type="button" onclick={inspectAlerts} disabled={loading}>
+    {loading ? "Retrieving alerts..." : "Inspect Service Alerts"}
   </button>
 
   {#if errorMessage}
@@ -246,9 +221,8 @@ if (shuttleAlert) {
       </p>
 
       <p class="explanation">
-        Active now means the current time falls within
-        an alert's active period. It does not mean
-        the alert affects your particular train.
+        Active now means the current time falls within an alert's active period.
+        It does not mean the alert affects your particular train.
       </p>
 
       <p class="explanation">
@@ -256,40 +230,39 @@ if (shuttleAlert) {
       </p>
 
       {#if alerts.length === 0}
-        <p>
-          The API returned no Franklin Line alerts.
-        </p>
+        <p>The API returned no Franklin Line alerts.</p>
       {:else}
         {#each alerts.slice(0, 10) as alert (alert.id)}
           <article class="alert">
             <h4>
-              {alert.attributes.short_header
-                ?? alert.attributes.header
-                ?? 'Untitled MBTA alert'}
+              {alert.attributes.short_header ??
+                alert.attributes.header ??
+                "Untitled MBTA alert"}
             </h4>
 
             <p>
-              <strong>Alert ID:</strong> {alert.id}
+              <strong>Alert ID:</strong>
+              {alert.id}
             </p>
 
             <p>
               <strong>Effect:</strong>
-              {alert.attributes.effect ?? 'Not supplied'}
+              {alert.attributes.effect ?? "Not supplied"}
             </p>
 
             <p>
               <strong>Lifecycle:</strong>
-              {alert.attributes.lifecycle ?? 'Not supplied'}
+              {alert.attributes.lifecycle ?? "Not supplied"}
             </p>
 
             <p>
               <strong>Active right now:</strong>
-              {isActiveNow(alert) ? 'Yes' : 'No'}
+              {isActiveNow(alert) ? "Yes" : "No"}
             </p>
 
             <p>
               <strong>Description:</strong>
-              {alert.attributes.description ?? 'Not supplied'}
+              {alert.attributes.description ?? "Not supplied"}
             </p>
 
             <h5>Active periods</h5>
@@ -307,62 +280,59 @@ if (shuttleAlert) {
               {/each}
             {/if}
 
-            
-<div class="affected-entities">
-  <h5>Affected entities</h5>
+            <div class="affected-entities">
+              <h5>Affected entities</h5>
 
-  <p>
-    <strong>Entity records:</strong>
-    {(alert.attributes.informed_entity ?? []).length}
-  </p>
+              <p>
+                <strong>Entity records:</strong>
+                {(alert.attributes.informed_entity ?? []).length}
+              </p>
 
-  {#if (alert.attributes.informed_entity ?? []).length === 0}
-    <p>No affected-entity details supplied.</p>
-  {:else}
-    {#each alert.attributes.informed_entity as entity, index}
-      <div class="entity-record">
-        <p><strong>Entity {index + 1}</strong></p>
+              {#if (alert.attributes.informed_entity ?? []).length === 0}
+                <p>No affected-entity details supplied.</p>
+              {:else}
+                {#each alert.attributes.informed_entity as entity, index}
+                  <div class="entity-record">
+                    <p><strong>Entity {index + 1}</strong></p>
 
-        <p>
-          <strong>Route:</strong>
-          {entity.route ?? 'Not specified'}
-        </p>
+                    <p>
+                      <strong>Route:</strong>
+                      {entity.route ?? "Not specified"}
+                    </p>
 
-        <p>
-          <strong>Stop:</strong>
-          {entity.stop ?? 'Not specified'}
-        </p>
+                    <p>
+                      <strong>Stop:</strong>
+                      {entity.stop ?? "Not specified"}
+                    </p>
 
-        <p>
-          <strong>Trip:</strong>
-          {entity.trip ?? 'Not specified'}
-        </p>
+                    <p>
+                      <strong>Trip:</strong>
+                      {entity.trip ?? "Not specified"}
+                    </p>
 
-        <p>
-          <strong>Direction:</strong>
-          {entity.direction_id === 1
-            ? 'Inbound (1)'
-            : entity.direction_id === 0
-              ? 'Outbound (0)'
-              : 'Not specified'}
-        </p>
+                    <p>
+                      <strong>Direction:</strong>
+                      {entity.direction_id === 1
+                        ? "Inbound (1)"
+                        : entity.direction_id === 0
+                          ? "Outbound (0)"
+                          : "Not specified"}
+                    </p>
 
-        <p>
-          <strong>Activities:</strong>
-          {(entity.activities ?? []).join(', ') || 'Not specified'}
-        </p>
-      </div>
-    {/each}
-  {/if}
-</div>
-
+                    <p>
+                      <strong>Activities:</strong>
+                      {(entity.activities ?? []).join(", ") || "Not specified"}
+                    </p>
+                  </div>
+                {/each}
+              {/if}
+            </div>
           </article>
         {/each}
 
         {#if alerts.length > 10}
           <p>
-            Showing the first 10 alerts.
-            The complete response is also available
+            Showing the first 10 alerts. The complete response is also available
             in the Firefox console.
           </p>
         {/if}
@@ -458,21 +428,20 @@ if (shuttleAlert) {
     color: #b91c1c;
   }
 
-.affected-entities {
-  margin-top: 16px;
-  padding-top: 10px;
-  border-top: 1px solid #cbd5e1;
-}
+  .affected-entities {
+    margin-top: 16px;
+    padding-top: 10px;
+    border-top: 1px solid #cbd5e1;
+  }
 
-.entity-record {
-  margin-top: 10px;
-  padding: 12px;
-  border-radius: 8px;
-  background: #f1f5f9;
-}
+  .entity-record {
+    margin-top: 10px;
+    padding: 12px;
+    border-radius: 8px;
+    background: #f1f5f9;
+  }
 
-.entity-record p {
-  margin: 5px 0;
-}
-
+  .entity-record p {
+    margin: 5px 0;
+  }
 </style>

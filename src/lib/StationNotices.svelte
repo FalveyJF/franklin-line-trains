@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onMount } from "svelte";
 
-    import { getFranklinAlerts } from "#lib/api/alerts.ts";
+    import { getCommuterRailAlerts } from "#lib/api/alerts.ts";
 
     import {
         getActiveStationNotices,
@@ -18,9 +18,16 @@
     import type { MBTAAlert } from "#lib/api/alerts.ts";
 
     // Notify the parent page when fresh alerts are available.
+
     let {
+        routeId,
+        originStationName,
+        destinationStationName,
         onAlertsUpdated,
     }: {
+        routeId: string;
+        originStationName: string;
+        destinationStationName: string;
         onAlertsUpdated?: (alerts: MBTAAlert[]) => void;
     } = $props();
 
@@ -46,7 +53,7 @@
     let componentActive = false;
 
     /**
-     * Retrieve Franklin Line alerts and identify
+     * Retrieve Line alerts and identify
      * current station notices.
      *
      * If refreshing fails, retain the previous notices.
@@ -69,7 +76,7 @@
         errorMessage = "";
 
         try {
-            const alerts = await getFranklinAlerts();
+            const alerts = await getCommuterRailAlerts(routeId);
 
             if (!componentActive) {
                 return;
@@ -92,20 +99,20 @@
             );
 
             // console.log(
-            //     "Current Franklin Line service changes:",
+            //     "Current  Line service changes:",
             //     currentServiceChanges,
             // );
 
             lastChecked = checkedAt.getTime();
 
             // console.log(
-            //     "Upcoming Franklin Line shuttle notices:",
+            //     "Upcoming  Line shuttle notices:",
             //     upcomingShuttles,
             // );
 
             lastChecked = Date.now();
 
-            // console.log("Active Franklin Line station notices:", notices);
+            // console.log("Active Line station notices:", notices);
         } catch (error) {
             if (!componentActive) {
                 return;
@@ -221,7 +228,7 @@
         {#each currentServiceChanges as change (change.id)}
             <article class="current-change-notice">
                 <p class="current-change-label">
-                    Franklin/Foxboro Line schedule advisory
+                    Commuter rail schedule advisory
                 </p>
 
                 <p class="current-change-heading">
@@ -275,9 +282,8 @@
         {/each}
 
         <p class="explanation">
-            These advisories may affect other portions of the Franklin/Foxboro
-            Line. They do not necessarily indicate a disruption between South
-            Station and Norwood Central.
+            These advisories describe upcoming changes on the selected commuter
+            rail line. They do not necessarily affect your selected journey.
         </p>
     </section>
 {/if}

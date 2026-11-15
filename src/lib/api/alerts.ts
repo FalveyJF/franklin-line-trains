@@ -4,7 +4,7 @@
  */
 
 const MBTA_API_BASE = 'https://api-v3.mbta.com';
-const FRANKLIN_ROUTE_ID = 'CR-Franklin';
+
 
 const PAGE_SIZE = 100;
 const MAX_PAGES = 5;
@@ -62,10 +62,16 @@ export interface MBTAAlert {
  * It does not yet determine whether an alert
  * affects a particular train or commute.
  */
-export async function getFranklinAlerts(): Promise<MBTAAlert[]> {
+
+
+export async function getCommuterRailAlerts(
+    routeId: string
+): Promise<MBTAAlert[]> {
+
+
   const url = new URL(`${MBTA_API_BASE}/alerts`);
 
-  url.searchParams.set('filter[route]', FRANKLIN_ROUTE_ID);
+  url.searchParams.set('filter[route]', routeId);
   url.searchParams.set('page[limit]', String(PAGE_SIZE));
 
   const alertMap = new Map<string, MBTAAlert>();

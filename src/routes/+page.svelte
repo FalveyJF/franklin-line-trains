@@ -1,16 +1,12 @@
 <script lang="ts">
     import { onMount } from "svelte";
 
-    import {
-        getInboundTrains,
-        getOutboundTrains,
-        type MatchedTrain,
-    } from "#lib/api/mbta.ts";
+    import { getTrainLookup, type MatchedTrain } from "#lib/api/mbta.ts";
 
     import {
-        getStationPredictions,
         NORWOOD_CENTRAL_ID,
         SOUTH_STATION_ID,
+        NORTH_STATION_ID,
     } from "#lib/api/predictions.ts";
 
     import {
@@ -27,7 +23,6 @@
         type CommuteDirection,
     } from "#lib/eastern-time.ts";
 
-    import type { MBTAPrediction } from "#lib/mbta-types.ts";
     //    import PredictionInspector from "#lib/PredictionInspector.svelte";
     //import TripStopInspector from "#lib/TripStopInspector.svelte";
     //import AlertInspector from "#lib/AlertInspector.svelte";
@@ -36,6 +31,37 @@
     import type { MBTAAlert } from "#lib/api/alerts.ts";
 
     import TrainCardAlerts from "#lib/TrainCardAlerts.svelte";
+
+    import CommuterRailLineSelector from "#lib/CommuterRailLineSelector.svelte";
+
+    import {
+        getCommuterRailRoutes,
+        type CommuterRailRoute,
+    } from "#lib/api/commuter-routes.ts";
+
+    import {
+        getCommuterRailStations,
+        type CommuterRailStation,
+    } from "#lib/api/commuter-stations.ts";
+
+    import CommuterRailStationSelector from "#lib/CommuterRailStationSelector.svelte";
+
+    // import { runStationDirectionTests } from "#lib/station-direction.test.ts";
+
+    import {
+        getCachedCommuterRailRoutePatterns,
+        selectRepresentativePatterns,
+        lookupStationPair,
+        continueStationPairLookup,
+        getOrderedCommuterRailStations,
+        type CommuterRailRoutePattern,
+    } from "#lib/api/route-patterns.ts";
+
+    import type { StationPairLookupResult } from "#lib/api/route-patterns.ts";
+
+    import type { StationPairCoverage } from "#lib/station-direction.ts";
+
+    import { getScheduleDirection } from "#lib/schedule-direction.ts";
 
     const REFRESH_INTERVAL_MS = 60_000;
     const DEPARTURE_GRACE_PERIOD_MS = 15 * 60 * 1000;
@@ -59,15 +85,400 @@
     // Latest alerts shared by StationNotices.
     let serviceAlerts = $state<MBTAAlert[]>([]);
 
+    let commuterRailRoutes = $state<CommuterRailRoute[]>([]);
+
+    let selectedRouteId = $state("CR-Franklin");
+
+    let routeCatalogError = $state("");
+
+    // Stations belonging to the selected commuter rail line.
+    let commuterRailStations = $state<CommuterRailStation[]>([]);
+
+    let stationCatalogError = $state("");
+
+    let stationsLoading = $state(false);
+
+    // Step 175: Initial station selections.
+    let selectedOriginStopId = $state("place-FB-0148");
+    let selectedDestinationStopId = $state("place-sstat");
+
+    // Step 205: Route patterns for the selected line.
+    let commuterRailPatterns = $state<CommuterRailRoutePattern[]>([]);
+
+    // Step 206: Reduced route-pattern candidate list.
+    const selectedCommuterRailPatterns = $derived(
+        selectRepresentativePatterns(commuterRailPatterns),
+    );
+
+    // Step 211: Station-pair lookup state.
+    let stationPairLookup = $state<StationPairLookupResult | null>(null);
+
+    let stationPairLookupLoading = $state(false);
+    let stationJourneyPendingVerification = $state(false);
+
+    let stationPairLookupError = $state("");
+
+    let stationPairLookupRequestNumber = 0;
+
+    function clearStationPairLookup() {
+        // Invalidate any station-pair lookup in progress.
+        stationPairLookupRequestNumber++;
+
+        stationPairLookup = null;
+        stationPairLookupLoading = false;
+        stationPairLookupError = "";
+    }
+
+    async function loadStationPairLookup() {
+        const routeId = selectedRouteId;
+        const originStopId = selectedOriginStopId;
+        const destinationStopId = selectedDestinationStopId;
+
+        const patterns = [...selectedCommuterRailPatterns];
+
+        // Do not request trip information until both
+        // stations and the pattern catalog are available.
+        if (
+            !originStopId ||
+            !destinationStopId ||
+            originStopId === destinationStopId ||
+            patterns.length === 0
+        ) {
+            clearStationPairLookup();
+            return;
+        }
+
+        const thisRequest = ++stationPairLookupRequestNumber;
+
+        stationPairLookup = null;
+        stationPairLookupError = "";
+        stationPairLookupLoading = true;
+
+        try {
+            const result = await lookupStationPair(
+                originStopId,
+                destinationStopId,
+                patterns,
+            );
+
+            // Ignore results if the journey has changed.
+            if (
+                thisRequest !== stationPairLookupRequestNumber ||
+                selectedRouteId !== routeId ||
+                selectedOriginStopId !== originStopId ||
+                selectedDestinationStopId !== destinationStopId
+            ) {
+                return;
+            }
+
+            stationPairLookup = result;
+            stationPairLookupLoading = false;
+
+            // Step 227: Start a train search only when
+            // the examined candidate list establishes a
+            // consistent direction and is complete.
+            if (result.complete && result.coverage.status === "supported") {
+                searchVerifiedStationPair();
+            }
+        } catch (error) {
+            if (thisRequest !== stationPairLookupRequestNumber) {
+                return;
+            }
+
+            stationPairLookupError = "Unable to verify this station pair.";
+
+            stationPairLookupLoading = false;
+
+            console.error("Station-pair lookup failed:", error);
+        }
+    }
+
+    async function loadMoreStationPairPatterns() {
+        const previous = stationPairLookup;
+
+        // Nothing to continue if no initial lookup exists,
+        // a lookup is running, or all candidates were examined.
+        if (!previous || previous.complete || stationPairLookupLoading) {
+            return;
+        }
+
+        const routeId = selectedRouteId;
+        const originStopId = selectedOriginStopId;
+        const destinationStopId = selectedDestinationStopId;
+        const patterns = [...selectedCommuterRailPatterns];
+
+        const thisRequest = ++stationPairLookupRequestNumber;
+
+        stationPairLookupLoading = true;
+        stationPairLookupError = "";
+
+        try {
+            const result = await continueStationPairLookup(
+                originStopId,
+                destinationStopId,
+                patterns,
+                previous,
+            );
+
+            // Discard results if the selected journey changed.
+            if (
+                thisRequest !== stationPairLookupRequestNumber ||
+                selectedRouteId !== routeId ||
+                selectedOriginStopId !== originStopId ||
+                selectedDestinationStopId !== destinationStopId
+            ) {
+                return;
+            }
+
+            stationPairLookup = result;
+            stationPairLookupLoading = false;
+
+            // Step 228: Search automatically when the
+            // continued lookup establishes a direction
+            // and finishes the candidate list.
+            if (result.complete && result.coverage.status === "supported") {
+                searchVerifiedStationPair();
+            }
+        } catch (error) {
+            if (thisRequest !== stationPairLookupRequestNumber) {
+                return;
+            }
+
+            stationPairLookupLoading = false;
+            stationPairLookupError =
+                "Unable to examine additional route patterns.";
+
+            console.error("Additional station-pair lookup failed:", error);
+        }
+    }
+
+    const stationPairCoverage = $derived<StationPairCoverage | null>(
+        stationPairLookup?.coverage ?? null,
+    );
+
+    // Step 221: Whether both selected stations are valid.
+    const stationSelectionReady = $derived(hasValidStationSelection());
+
+    /**
+     * Step 223: Direction supported by the route patterns
+     * examined for the selected station pair.
+     *
+     * 0 = outbound
+     * 1 = inbound
+     * null = direction not yet established
+     *
+     * Actual schedules must still confirm train service.
+     */
+    const stationPairSearchDirection = $derived<0 | 1 | null>(
+        stationSelectionReady && stationPairCoverage?.status === "supported"
+            ? stationPairCoverage.directionId
+            : null,
+    );
+
+    let routePatternsLoading = $state(false);
+
+    let routePatternsError = $state("");
+
     let requestNumber = 0;
 
     let originName = $derived(
-        direction === "inbound" ? "Norwood Central" : "South Station",
+        commuterRailStations.find(
+            (station) => station.id === selectedOriginStopId,
+        )?.name ?? "Select departure station",
     );
 
     let destinationName = $derived(
-        direction === "inbound" ? "South Station" : "Norwood Central",
+        commuterRailStations.find(
+            (station) => station.id === selectedDestinationStopId,
+        )?.name ?? "Select arrival station",
     );
+
+    function syncStationsWithDirection(selectedDirection: CommuteDirection) {
+        clearStationPairLookup();
+        const selectedRoute = commuterRailRoutes.find(
+            (route) => route.id === selectedRouteId,
+        );
+
+        const terminalStopId =
+            selectedRoute?.terminal === "north"
+                ? NORTH_STATION_ID
+                : SOUTH_STATION_ID;
+
+        const origin = selectedOriginStopId;
+        const destination = selectedDestinationStopId;
+
+        // If the terminal is already on the correct side,
+        // preserve the existing station selections.
+        if (selectedDirection === "inbound") {
+            if (destination === terminalStopId) {
+                return;
+            }
+
+            if (origin === terminalStopId) {
+                selectedOriginStopId = destination;
+                selectedDestinationStopId = origin;
+                return;
+            }
+        } else {
+            if (origin === terminalStopId) {
+                return;
+            }
+
+            if (destination === terminalStopId) {
+                selectedOriginStopId = destination;
+                selectedDestinationStopId = origin;
+                return;
+            }
+        }
+
+        // If neither station has been selected, initialize
+        // only the terminal for the requested direction.
+        if (!origin && !destination) {
+            if (selectedDirection === "inbound") {
+                selectedDestinationStopId = terminalStopId;
+            } else {
+                selectedOriginStopId = terminalStopId;
+            }
+        }
+    }
+
+    // Step 166: Load all commuter rail lines once.
+    $effect(() => {
+        let active = true;
+
+        getCommuterRailRoutes()
+            .then((routes) => {
+                if (active) {
+                    commuterRailRoutes = routes;
+                    routeCatalogError = "";
+                }
+            })
+            .catch((error) => {
+                if (active) {
+                    routeCatalogError = "Unable to load commuter rail lines.";
+
+                    console.error("Commuter rail route catalog:", error);
+                }
+            });
+
+        return () => {
+            active = false;
+        };
+    });
+
+    // Step 174: Load stations whenever the selected line changes.
+    $effect(() => {
+        const routeId = selectedRouteId;
+        let active = true;
+
+        commuterRailStations = [];
+        stationCatalogError = "";
+        stationsLoading = true;
+
+        getCommuterRailStations(routeId)
+            .then((stations) =>
+                getOrderedCommuterRailStations(routeId, stations),
+            )
+            .then((stations) => {
+                if (active) {
+                    commuterRailStations = stations;
+
+                    stationsLoading = false;
+
+                    // Identify the terminal for the selected line.
+                    const selectedRoute = commuterRailRoutes.find(
+                        (route) => route.id === routeId,
+                    );
+
+                    const terminalStopId =
+                        selectedRoute?.terminal === "north"
+                            ? NORTH_STATION_ID
+                            : SOUTH_STATION_ID;
+
+                    // Only initialize the stations when a route change
+                    // has cleared the previous station selections.
+                    if (!selectedOriginStopId && !selectedDestinationStopId) {
+                        if (direction === "inbound") {
+                            selectedDestinationStopId = terminalStopId;
+                        } else {
+                            selectedOriginStopId = terminalStopId;
+                        }
+                    }
+                }
+            })
+            .catch((error) => {
+                if (active) {
+                    stationCatalogError =
+                        "Unable to load stations for this line.";
+                    stationsLoading = false;
+
+                    console.error("Commuter rail station catalog:", error);
+                }
+            });
+
+        return () => {
+            active = false;
+        };
+    });
+
+    // Step 205: Load route patterns when the line changes.
+    // $effect(() => {
+    //     const routeId = selectedRouteId;
+    //     let active = true;
+
+    //     commuterRailPatterns = [];
+    //     routePatternsError = "";
+    //     routePatternsLoading = true;
+
+    //     getCachedCommuterRailRoutePatterns(routeId)
+    //         .then((patterns) => {
+    //             if (!active) {
+    //                 return;
+    //             }
+
+    //             commuterRailPatterns = patterns;
+    //             routePatternsLoading = false;
+    //         })
+    //         .catch((error) => {
+    //             if (!active) {
+    //                 return;
+    //             }
+
+    //             routePatternsError = "Unable to load route patterns.";
+
+    //             routePatternsLoading = false;
+
+    //             console.error("Commuter rail route patterns:", error);
+    //         });
+
+    //     return () => {
+    //         active = false;
+    //     };
+    // });
+
+    function getSignedDelayMinutes(
+        scheduledTime: string | null,
+        predictedTime: string | null,
+    ): string | null {
+        if (!scheduledTime || !predictedTime) {
+            return null;
+        }
+
+        const scheduled = new Date(scheduledTime).getTime();
+        const predicted = new Date(predictedTime).getTime();
+
+        if (!Number.isFinite(scheduled) || !Number.isFinite(predicted)) {
+            return null;
+        }
+
+        const minutes = Math.round((predicted - scheduled) / 60000);
+
+        if (minutes === 0) {
+            return null;
+        }
+
+        return minutes > 0 ? `(+${minutes})` : `(${minutes})`;
+    }
 
     /**
      * Return the best available departure timestamp.
@@ -187,8 +598,21 @@
     async function loadData(
         selectedDirection: CommuteDirection,
         fullLoad: boolean,
+        searchDirectionId: 0 | 1 | null = selectedDirection === "inbound"
+            ? 1
+            : 0,
     ) {
+        // Do not load trains for a newly selected
+        // station pair until its direction is verified.
+        if (stationJourneyPendingVerification) {
+            return;
+        }
+
         const thisRequest = ++requestNumber;
+
+        const requestedRouteId = selectedRouteId;
+        const requestedOriginStopId = selectedOriginStopId;
+        const requestedDestinationStopId = selectedDestinationStopId;
 
         if (fullLoad) {
             loading = true;
@@ -203,62 +627,47 @@
         try {
             const date = getEasternServiceDate();
 
-            const scheduledTrains =
-                selectedDirection === "inbound"
-                    ? await getInboundTrains(date)
-                    : await getOutboundTrains(date);
+            const trainLookup = await getTrainLookup(
+                requestedOriginStopId,
+                requestedDestinationStopId,
+                searchDirectionId,
+                date,
+                requestedRouteId,
+            );
 
-            const originStopId =
-                selectedDirection === "inbound"
-                    ? NORWOOD_CENTRAL_ID
-                    : SOUTH_STATION_ID;
+            const scheduledTrains = trainLookup.trains;
 
-            const destinationStopId =
-                selectedDirection === "inbound"
-                    ? SOUTH_STATION_ID
-                    : NORWOOD_CENTRAL_ID;
+            const detectedScheduleDirection =
+                searchDirectionId === null
+                    ? getScheduleDirection(scheduledTrains)
+                    : null;
 
-            const [departureResult, arrivalResult] = await Promise.allSettled([
-                getStationPredictions(originStopId),
-                getStationPredictions(destinationStopId),
-            ]);
+            if (detectedScheduleDirection?.status === "ambiguous") {
+                throw new Error("Matching trains have conflicting directions.");
+            }
 
             if (
                 thisRequest !== requestNumber ||
-                direction !== selectedDirection
+                direction !== selectedDirection ||
+                selectedRouteId !== requestedRouteId ||
+                selectedOriginStopId !== requestedOriginStopId ||
+                selectedDestinationStopId !== requestedDestinationStopId
             ) {
                 return;
             }
 
-            let departurePredictions: MBTAPrediction[] = [];
-            let arrivalPredictions: MBTAPrediction[] = [];
-
-            if (departureResult.status === "fulfilled") {
-                departurePredictions = departureResult.value;
-            } else {
-                console.error(
-                    "Origin predictions failed:",
-                    departureResult.reason,
-                );
-            }
-
-            if (arrivalResult.status === "fulfilled") {
-                arrivalPredictions = arrivalResult.value;
-            } else {
-                console.error(
-                    "Destination predictions failed:",
-                    arrivalResult.reason,
-                );
-            }
-
+            // Update the displayed direction only after confirming
+            // this response is still current.
             if (
-                departureResult.status === "rejected" ||
-                arrivalResult.status === "rejected"
+                searchDirectionId === null &&
+                detectedScheduleDirection?.directionId !== null &&
+                detectedScheduleDirection?.directionId !== undefined
             ) {
-                predictionWarning =
-                    "Some real-time predictions could not be retrieved. " +
-                    "Scheduled times are still available.";
+                applyScheduleDirection(detectedScheduleDirection.directionId);
             }
+
+            const departurePredictions = trainLookup.departurePredictions;
+            const arrivalPredictions = trainLookup.arrivalPredictions;
 
             trains = matchTrainPredictions(
                 scheduledTrains,
@@ -266,38 +675,7 @@
                 arrivalPredictions,
             );
 
-            // Temporary diagnostic information from Step 25.
-            // console.log("MBTA prediction matching diagnostic", {
-            //     direction: selectedDirection,
-            //     scheduledTrains: scheduledTrains.length,
-            //     originPredictions: departurePredictions.length,
-            //     destinationPredictions: arrivalPredictions.length,
-            //     matchedDeparturePredictions: trains.filter(
-            //         (item) => item.departurePrediction !== null,
-            //     ).length,
-            //     matchedArrivalPredictions: trains.filter(
-            //         (item) => item.arrivalPrediction !== null,
-            //     ).length,
-            // });
-
-            console.table(
-                trains
-                    .filter(
-                        (item) =>
-                            item.departurePrediction !== null ||
-                            item.arrivalPrediction !== null,
-                    )
-                    .map((item) => ({
-                        train: item.train.trainNumber,
-                        tripId: item.train.tripId,
-                        predictedDeparture:
-                            item.departurePrediction?.attributes
-                                .departure_time ?? "Not supplied",
-                        predictedArrival:
-                            item.arrivalPrediction?.attributes.arrival_time ??
-                            "Not supplied",
-                    })),
-            );
+            //
 
             serviceDate = date;
             currentTime = Date.now();
@@ -318,17 +696,281 @@
         }
     }
 
-    function selectDirection(selectedDirection: CommuteDirection) {
+    /**
+     * Check whether enough information is available
+     * to search for trains between selected stations.
+     *
+     * This does not determine travel direction or
+     * confirm that a scheduled train exists.
+     */
+    function hasValidStationSelection(): boolean {
+        if (
+            !selectedRouteId ||
+            !selectedOriginStopId ||
+            !selectedDestinationStopId
+        ) {
+            return false;
+        }
+
+        if (selectedOriginStopId === selectedDestinationStopId) {
+            return false;
+        }
+
+        // Both stations must belong to the
+        // currently selected commuter rail line.
+        const originAvailable = commuterRailStations.some(
+            (station) => station.id === selectedOriginStopId,
+        );
+
+        const destinationAvailable = commuterRailStations.some(
+            (station) => station.id === selectedDestinationStopId,
+        );
+
+        return originAvailable && destinationAvailable;
+    }
+
+    /**
+     * Step 238: Synchronize the displayed direction
+     * with the direction reported by MBTA schedules.
+     *
+     * Preserve the selected departure and arrival stations.
+     *
+     * Returns false if no valid direction was supplied.
+     */
+    function applyScheduleDirection(directionId: 0 | 1 | null): boolean {
+        if (directionId === null || !hasValidStationSelection()) {
+            return false;
+        }
+
+        const scheduledDirection: CommuteDirection =
+            directionId === 1 ? "inbound" : "outbound";
+
+        // Update the displayed direction without
+        // swapping the selected stations.
+        direction = scheduledDirection;
+
+        // Preserve the user's station-based selection
+        // instead of reverting to the time-of-day default.
         manualDirectionOverride = true;
 
-        if (direction === selectedDirection) {
+        return true;
+    }
+
+    /**
+     * Step 225: Apply the direction established by
+     * route-pattern verification.
+     *
+     * Preserve the user's selected departure and
+     * arrival stations.
+     *
+     * Returns false when direction is not established.
+     */
+    function applyVerifiedStationPairDirection(): boolean {
+        if (!stationSelectionReady || stationPairSearchDirection === null) {
+            return false;
+        }
+
+        const verifiedDirection: CommuteDirection =
+            stationPairSearchDirection === 1 ? "inbound" : "outbound";
+
+        // Preserve manually selected station pairs.
+        // Do not call syncStationsWithDirection().
+        direction = verifiedDirection;
+
+        // A station-pair selection overrides the
+        // automatic morning/evening commute direction.
+        manualDirectionOverride = true;
+
+        return true;
+    }
+
+    /**
+     * Step 226: Search for trains only when the
+     * station-pair lookup establishes a direction.
+     *
+     * Preserve the user's selected stations.
+     */
+    function searchVerifiedStationPair(): boolean {
+        if (
+            !stationSelectionReady ||
+            !stationPairLookup ||
+            !stationPairLookup.complete ||
+            stationPairCoverage?.status !== "supported" ||
+            stationPairSearchDirection === null ||
+            stationPairLookupLoading
+        ) {
+            return false;
+        }
+
+        // Update Inbound/Outbound without rearranging
+        // the selected departure and arrival stations.
+        if (!applyVerifiedStationPairDirection()) {
+            return false;
+        }
+
+        const verifiedDirectionId = stationPairSearchDirection;
+
+        const verifiedDirection: CommuteDirection =
+            verifiedDirectionId === 1 ? "inbound" : "outbound";
+
+        // The journey is verified; normal train
+        // searches and refreshes may resume.
+        stationJourneyPendingVerification = false;
+
+        // Request schedules and predictions for
+        // the currently selected station pair.
+        void loadData(verifiedDirection, true, verifiedDirectionId);
+
+        return true;
+    }
+
+    function selectCommuterRailStation(
+        stationType: "origin" | "destination",
+        stopId: string,
+    ) {
+        // Step 220: Departure and arrival must differ.
+        const otherStopId =
+            stationType === "origin"
+                ? selectedDestinationStopId
+                : selectedOriginStopId;
+
+        if (stopId && stopId === otherStopId) {
+            stationPairLookupError =
+                "Departure and arrival must be different stations.";
             return;
         }
 
-        direction = selectedDirection;
+        if (stationType === "origin") {
+            if (selectedOriginStopId === stopId) {
+                return;
+            }
+            selectedOriginStopId = stopId;
+        } else {
+            if (selectedDestinationStopId === stopId) {
+                return;
+            }
+            selectedDestinationStopId = stopId;
+        }
+
+        // Invalidate outstanding requests for the old journey.
+        requestNumber++;
+
+        // Suspend train refreshes until the new
+        // station pair has been verified.
+        stationJourneyPendingVerification = true;
+
+        clearStationPairLookup();
+
+        // Clear the old train results.
         trains = [];
         lastUpdated = null;
         predictionWarning = "";
+        errorMessage = "";
+
+        loading = false;
+        refreshing = false;
+
+        // Step 222: Only verify complete station selections.
+        // Both stations must belong to the selected line.
+
+        if (hasValidStationSelection()) {
+            // Actual MBTA schedules will determine whether
+            // the selected journey is inbound or outbound.
+            // No representative route-pattern lookup is needed.
+            stationJourneyPendingVerification = false;
+
+            void loadData(direction, true, null);
+        }
+    }
+
+    function selectCommuterRailLine(routeId: string) {
+        if (routeId === selectedRouteId) {
+            return;
+        }
+
+        // Invalidate requests for the previously selected line.
+        requestNumber++;
+
+        // Suspend train searches until the new journey is verified.
+        stationJourneyPendingVerification = true;
+
+        // Clear the previous station-pair verification.
+        clearStationPairLookup();
+
+        // Update the selected commuter rail line.
+        selectedRouteId = routeId;
+
+        // Clear stations belonging to the previous line.
+        selectedOriginStopId = "";
+        selectedDestinationStopId = "";
+
+        // Clear train information from the previous line.
+        trains = [];
+        lastUpdated = null;
+        predictionWarning = "";
+        errorMessage = "";
+
+        loading = false;
+        refreshing = false;
+    }
+
+    function selectDirection(selectedDirection: CommuteDirection) {
+        manualDirectionOverride = true;
+
+        const directionChanged = direction !== selectedDirection;
+
+        // Identify the Boston terminal for this line.
+        const selectedRoute = commuterRailRoutes.find(
+            (route) => route.id === selectedRouteId,
+        );
+
+        const terminalStopId =
+            selectedRoute?.terminal === "north"
+                ? NORTH_STATION_ID
+                : SOUTH_STATION_ID;
+
+        // When reversing a journey between two intermediate
+        // stations, swap the selected departure and arrival.
+        if (
+            directionChanged &&
+            selectedOriginStopId &&
+            selectedDestinationStopId &&
+            selectedOriginStopId !== terminalStopId &&
+            selectedDestinationStopId !== terminalStopId
+        ) {
+            const previousOrigin = selectedOriginStopId;
+
+            selectedOriginStopId = selectedDestinationStopId;
+            selectedDestinationStopId = previousOrigin;
+        }
+
+        direction = selectedDirection;
+        syncStationsWithDirection(selectedDirection);
+
+        // Do not search while the new line or station
+        // selections are incomplete.
+        if (!hasValidStationSelection()) {
+            return;
+        }
+
+        // The user explicitly selected a direction.
+        // Allow normal train retrieval to resume.
+        const wasPending = stationJourneyPendingVerification;
+        stationJourneyPendingVerification = false;
+
+        // Avoid unnecessary requests when clicking
+        // the already-selected direction.
+        if (!directionChanged && !wasPending) {
+            return;
+        }
+
+        // Invalidate any earlier train request.
+        requestNumber++;
+
+        trains = [];
+        lastUpdated = null;
+        predictionWarning = "";
+        errorMessage = "";
 
         void loadData(selectedDirection, true);
     }
@@ -347,6 +989,7 @@
 
         if (dateChanged || directionChanged) {
             direction = selectedDirection;
+            syncStationsWithDirection(selectedDirection);
             serviceDate = today;
             trains = [];
             lastUpdated = null;
@@ -366,6 +1009,7 @@
     onMount(() => {
         serviceDate = getEasternServiceDate();
         direction = getDefaultDirection();
+        syncStationsWithDirection(direction);
         directionInitialized = true;
 
         void loadData(direction, true);
@@ -393,16 +1037,60 @@
         <p class="subtitle">MBTA Franklin/Foxboro Line</p>
     </header>
 
-    <StationNotices
-        onAlertsUpdated={(alerts) => {
-            serviceAlerts = alerts;
-            // Development diagnostic:
-            // console.log(
-            //     "Step 90 - Shared MBTA alert count:",
-            //     serviceAlerts.length,
-            // );
-        }}
-    />
+    <!-- Step 219: Incremental station-pair verification -->
+    {#if stationPairLookup}
+        <div class="station-pair-status">
+            {#if stationPairCoverage?.status === "supported"}
+                <p>
+                    Journey direction verified:
+                    {stationPairCoverage.directionId === 1
+                        ? "Inbound"
+                        : "Outbound"}
+                </p>
+            {:else if stationPairCoverage?.status === "unverified"}
+                <p>Journey not yet verified.</p>
+            {:else if stationPairCoverage?.status === "ambiguous"}
+                <p>Multiple possible directions found.</p>
+            {:else}
+                <p>Invalid station selection.</p>
+            {/if}
+
+            {#if !stationPairLookup.complete}
+                <button
+                    type="button"
+                    class="check-more-patterns-button"
+                    disabled={stationPairLookupLoading}
+                    onclick={() => void loadMoreStationPairPatterns()}
+                >
+                    {stationPairLookupLoading
+                        ? "Checking..."
+                        : "Check more route patterns"}
+                </button>
+
+                <p class="pattern-count">
+                    {stationPairLookup.examinedCount} checked,
+                    {stationPairLookup.remainingCount} remaining
+                </p>
+            {/if}
+        </div>
+    {/if}
+
+    {#if stationPairLookupError}
+        <p class="station-pair-error" role="alert">
+            {stationPairLookupError}
+        </p>
+    {/if}
+
+    {#key selectedRouteId}
+        <StationNotices
+            routeId={selectedRouteId}
+            originStationName={originName}
+            destinationStationName={destinationName}
+            onAlertsUpdated={(alerts) => {
+                serviceAlerts = alerts;
+            }}
+        />
+    {/key}
 
     <section class="schedule-section">
         <h2>Train Direction</h2>
@@ -440,7 +1128,70 @@
                 Service date: {formatServiceDate(serviceDate)}
             </p>
         {/if}
+        {#if commuterRailRoutes.length > 0}
+            <CommuterRailLineSelector
+                routes={commuterRailRoutes}
+                {selectedRouteId}
+                onRouteChange={selectCommuterRailLine}
+                disabled={false}
+            />
+        {:else if routeCatalogError}
+            <p role="alert">{routeCatalogError}</p>
+        {/if}
 
+        <!-- Step 175: Station selectors -->
+        {#if commuterRailStations.length > 0}
+            <div class="station-selectors">
+                <CommuterRailStationSelector
+                    id="departure-station"
+                    label="Departure station"
+                    stations={commuterRailStations}
+                    selectedStopId={selectedOriginStopId}
+                    excludeStopId={selectedDestinationStopId}
+                    onStationChange={(stopId) => {
+                        selectCommuterRailStation("origin", stopId);
+                    }}
+                    disabled={false}
+                />
+
+                <div class="direction-switch">
+                    <span class="direction-label">
+                        {direction === "inbound" ? "Inbound" : "Outbound"}
+                    </span>
+
+                    <button
+                        type="button"
+                        class="reverse-stations-button"
+                        aria-label="Reverse departure and arrival stations"
+                        title="Reverse direction"
+                        onclick={() =>
+                            selectDirection(
+                                direction === "inbound"
+                                    ? "outbound"
+                                    : "inbound",
+                            )}
+                    >
+                        ⇄
+                    </button>
+                </div>
+
+                <CommuterRailStationSelector
+                    id="arrival-station"
+                    label="Arrival station"
+                    stations={commuterRailStations}
+                    selectedStopId={selectedDestinationStopId}
+                    excludeStopId={selectedOriginStopId}
+                    onStationChange={(stopId) => {
+                        selectCommuterRailStation("destination", stopId);
+                    }}
+                    disabled={false}
+                />
+            </div>
+        {:else if stationsLoading}
+            <p>Loading stations...</p>
+        {:else if stationCatalogError}
+            <p role="alert">{stationCatalogError}</p>
+        {/if}
         <label class="test-option">
             <input type="checkbox" bind:checked={showPastTrains} />
             Show past trains (testing)
@@ -484,13 +1235,38 @@
                                 null,
                         )}
 
+                        {@const departureMinutes = getSignedDelayMinutes(
+                            item.train.departure.attributes.departure_time,
+                            item.departurePrediction?.attributes
+                                .departure_time ?? null,
+                        )}
+
+                        {@const arrivalMinutes = getSignedDelayMinutes(
+                            item.train.arrival.attributes.arrival_time,
+                            item.arrivalPrediction?.attributes.arrival_time ??
+                                null,
+                        )}
+
                         <article class="train-card">
                             <div class="card-header">
-                                <div>
+                                <div class="train-heading">
                                     <span class="label">Train</span>
                                     <strong class="train-number">
                                         {item.train.trainNumber}
                                     </strong>
+                                    <span class="train-duration">
+                                        ({getTravelMinutes(item.train) ?? "—"} min)
+                                    </span>
+
+                                    {#if item.train.departure.attributes.pickup_type === 3 || item.train.arrival.attributes.drop_off_type === 3}
+                                        <span
+                                            class="flag-stop"
+                                            title="Flag stop — notify the conductor"
+                                            aria-label="Flag stop"
+                                        >
+                                            🚩
+                                        </span>
+                                    {/if}
                                 </div>
 
                                 <span class="direction-label">
@@ -515,17 +1291,32 @@
                                 <div class="time-block">
                                     <span class="label">{originName}</span>
 
-                                    <strong class="time">
-                                        {formatTime(
-                                            item.train.departure.attributes
-                                                .departure_time,
-                                        )}
-                                    </strong>
+                                    <div class="scheduled-time-row">
+                                        <strong class="time">
+                                            {formatTime(
+                                                item.train.departure.attributes
+                                                    .departure_time,
+                                            )}
+                                        </strong>
+
+                                        {#if departureMinutes !== null}
+                                            <span
+                                                class="delay"
+                                                class:late={departureDelay.status ===
+                                                    "late"}
+                                                class:early={departureDelay.status ===
+                                                    "early"}
+                                                title={`Departure ${departureMinutes} minutes`}
+                                            >
+                                                {departureMinutes}
+                                            </span>
+                                        {/if}
+                                    </div>
 
                                     <span class="time-description">
                                         Scheduled departure
                                     </span>
-
+                                    <!--
                                     <div class="prediction-detail">
                                         <span class="prediction-label">
                                             Predicted departure
@@ -556,23 +1347,38 @@
                                         >
                                             {departureDelay.label}
                                         </span>
-                                    </div>
+                                    </div> -->
                                 </div>
 
                                 <div class="time-block arrival">
                                     <span class="label">{destinationName}</span>
 
-                                    <strong class="time">
-                                        {formatTime(
-                                            item.train.arrival.attributes
-                                                .arrival_time,
-                                        )}
-                                    </strong>
+                                    <div class="scheduled-time-row">
+                                        <strong class="time">
+                                            {formatTime(
+                                                item.train.arrival.attributes
+                                                    .arrival_time,
+                                            )}
+                                        </strong>
+
+                                        {#if arrivalMinutes !== null}
+                                            <span
+                                                class="delay"
+                                                class:late={arrivalDelay.status ===
+                                                    "late"}
+                                                class:early={arrivalDelay.status ===
+                                                    "early"}
+                                                title={`Arrival ${arrivalMinutes} minutes`}
+                                            >
+                                                {arrivalMinutes}
+                                            </span>
+                                        {/if}
+                                    </div>
 
                                     <span class="time-description">
                                         Scheduled arrival
                                     </span>
-
+                                    <!--
                                     <div class="prediction-detail">
                                         <span class="prediction-label">
                                             Predicted arrival
@@ -603,17 +1409,17 @@
                                         >
                                             {arrivalDelay.label}
                                         </span>
-                                    </div>
+                                    </div>-->
                                 </div>
                             </div>
-
+                            <!--
                             <div class="card-footer">
                                 <span>Scheduled travel time</span>
                                 <strong>
                                     {getTravelMinutes(item.train) ?? "—"} min
                                 </strong>
                             </div>
-
+-->
                             <TrainCardAlerts
                                 train={item.train}
                                 alerts={serviceAlerts}
@@ -626,8 +1432,14 @@
     </section>
 
     <!--<PredictionInspector {direction} {trains} /> -->
-    <!-- <AlertInspector /> -->
-    <!-- <TripStopInspector {trains} /> -->
+
+    <!--
+<AlertInspector routeId={selectedRouteId} />
+<TripStopInspector
+    routeId={selectedRouteId}
+    {trains}
+/>
+-->
 
     <footer class="status">
         {#if refreshing}
@@ -762,26 +1574,36 @@
         width: 20px;
         height: 20px;
     }
+    /* Align arrival information with the right edge. */
+    .time-block.arrival {
+        align-items: flex-end;
+        text-align: right;
+    }
+
+    /* Keep the scheduled arrival and delay together. */
+    .time-block.arrival .scheduled-time-row {
+        justify-content: flex-end;
+    }
 
     .train-list {
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 8px;
         margin-top: 16px;
     }
 
     .train-card {
-        padding: 18px;
+        padding: 8px 10px;
         background: white;
         border: 1px solid #e2e8f0;
-        border-radius: 12px;
+        border-radius: 10px;
     }
 
     .card-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        margin-bottom: 20px;
+        margin-bottom: 6px;
     }
 
     .train-number {
@@ -808,7 +1630,7 @@
     .time-block {
         display: flex;
         flex-direction: column;
-        gap: 5px;
+        gap: 3px;
         min-width: 0;
     }
 
@@ -817,8 +1639,7 @@
     }
 
     .label,
-    .time-description,
-    .prediction-label {
+    .time-description {
         font-size: 12px;
         color: #64748b;
     }
@@ -829,24 +1650,24 @@
         white-space: nowrap;
     }
 
-    .prediction-detail {
+    /* .prediction-detail {
         display: flex;
         flex-direction: column;
         gap: 5px;
         margin-top: 12px;
         padding-top: 10px;
         border-top: 1px dashed #cbd5e1;
-    }
+    } */
 
-    .predicted-time {
+    /* .predicted-time {
         font-size: 19px;
         color: #172554;
-    }
+    } */
 
-    .unavailable {
+    /* .unavailable {
         font-size: 13px;
         color: #64748b;
-    }
+    } */
 
     .delay {
         font-size: 13px;
@@ -859,23 +1680,23 @@
     }
 
     .delay.early {
-        color: #1d4ed8;
+        color: #15803d;
     }
 
-    .delay.on-time {
+    /* .delay.on-time {
         color: #166534;
-    }
+    } */
 
-    .card-footer {
+    /* .card-footer {
         display: flex;
         justify-content: space-between;
         gap: 12px;
-        margin-top: 20px;
-        padding-top: 12px;
+        margin-top: 6px;
+        padding-top: 6px;
         border-top: 1px solid #e2e8f0;
         font-size: 13px;
         color: #475569;
-    }
+    } */
 
     .message,
     .error,
@@ -909,12 +1730,12 @@
             font-size: 19px;
         }
 
-        .predicted-time {
+        /* .predicted-time {
             font-size: 17px;
-        }
+        } */
 
         .train-card {
-            padding: 14px;
+            padding: 12 px;
         }
     }
 
@@ -937,5 +1758,121 @@
     .departure-warning span {
         font-size: 12px;
         line-height: 1.4;
+    }
+
+    .scheduled-time-row {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 8px;
+        min-width: 0;
+    }
+
+    .train-duration {
+        margin-left: 8px;
+        font-size: 13px;
+        font-weight: 400;
+        color: #64748b;
+        white-space: nowrap;
+    }
+
+    .train-heading {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        flex-wrap: nowrap;
+    }
+
+    .train-heading .train-duration {
+        margin-left: 0;
+    }
+
+    /* Step 175: Compact station selector layout. */
+
+    .station-selectors {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 64px minmax(0, 1fr);
+        align-items: end;
+        gap: 8px;
+        margin-bottom: 12px;
+    }
+
+    .direction-switch {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .direction-label {
+        font-size: 11px;
+        font-weight: 600;
+        color: #475569;
+        white-space: nowrap;
+    }
+
+    .reverse-stations-button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 44px;
+        height: 44px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #eff6ff;
+        color: #1d4ed8;
+        font-size: 25px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .reverse-stations-button:hover {
+        background: #dbeafe;
+    }
+
+    .reverse-stations-button:focus-visible {
+        outline: 2px solid #2563eb;
+        outline-offset: 2px;
+    }
+
+    /* Step 219: Station-pair verification controls. */
+    .station-pair-status {
+        margin-bottom: 12px;
+        padding: 10px 12px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        font-size: 13px;
+    }
+
+    .station-pair-status p {
+        margin: 0 0 6px;
+    }
+
+    .check-more-patterns-button {
+        min-height: 40px;
+        padding: 8px 12px;
+        border: 1px solid #2563eb;
+        border-radius: 8px;
+        background: #eff6ff;
+        color: #1d4ed8;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .check-more-patterns-button:disabled {
+        opacity: 0.6;
+        cursor: wait;
+    }
+
+    .station-pair-status .pattern-count {
+        margin: 6px 0 0;
+        color: #64748b;
+        font-size: 12px;
+    }
+
+    .station-pair-error {
+        color: #b91c1c;
+        font-size: 13px;
     }
 </style>

@@ -9,6 +9,7 @@ const FRANKLIN_ROUTE_ID = 'CR-Franklin';
 // Station IDs previously verified with the MBTA API.
 export const NORWOOD_CENTRAL_ID = 'place-FB-0148';
 export const SOUTH_STATION_ID = 'place-sstat';
+export const NORTH_STATION_ID = "place-north";
 
 const PAGE_SIZE = 100;
 const MAX_PAGES = 5;
@@ -20,13 +21,14 @@ const MAX_PAGES = 5;
  * Predictions are not guaranteed to exist for every trip.
  */
 export async function getStationPredictions(
-  stopId: string
+  stopId: string,
+  routeId: string = FRANKLIN_ROUTE_ID
 ): Promise<MBTAPrediction[]> {
   const url = new URL(`${MBTA_API_BASE}/predictions`);
 
   url.searchParams.set(
     'filter[route]',
-    FRANKLIN_ROUTE_ID
+    routeId
   );
 
   url.searchParams.set('filter[stop]', stopId);

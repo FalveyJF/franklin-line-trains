@@ -1,8 +1,8 @@
-
 import type {
   MBTARoute,
   MBTASchedule,
-  MBTATrip
+  MBTATrip,
+  MBTAPrediction
 } from '#lib/mbta-types.ts';
 
 const MBTA_API_BASE = 'https://api-v3.mbta.com';
@@ -16,7 +16,8 @@ const OUTBOUND = 0;
 
 const REGULAR_BOARDING = 0;
 const REGULAR_DROP_OFF = 0;
-
+const FLAG_STOP_BOARDING = 3;
+const FLAG_STOP_DROP_OFF = 3;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 5;
 
@@ -36,34 +37,46 @@ export async function getFranklinRoute(): Promise<MBTARoute> {
 
   const json: { data: MBTARoute } = await response.json();
 
+
+
   return json.data;
 }
 
 /**
  * Schedules and their associated trips.
  */
+
 export interface StationScheduleData {
   schedules: MBTASchedule[];
   trips: MBTATrip[];
+  predictions: MBTAPrediction[];
 }
+
 
 /**
  * Retrieve all schedule pages for a station and date.
  */
+
 export async function getStationSchedules(
   stopId: string,
-  date: string
+  date: string,
+  routeId: string = FRANKLIN_ROUTE_ID
 ): Promise<StationScheduleData> {
+
   const url = new URL(`${MBTA_API_BASE}/schedules`);
 
-  url.searchParams.set('filter[route]', FRANKLIN_ROUTE_ID);
+  url.searchParams.set('filter[route]', routeId);
   url.searchParams.set('filter[stop]', stopId);
   url.searchParams.set('filter[date]', date);
-  url.searchParams.set('include', 'trip');
+
+  url.searchParams.set('include', 'trip,prediction');
+
   url.searchParams.set('page[limit]', String(PAGE_SIZE));
 
   const scheduleMap = new Map<string, MBTASchedule>();
   const tripMap = new Map<string, MBTATrip>();
+  const predictionMap = new Map<string, MBTAPrediction>();
+
 
   let nextUrl: string | null = url.toString();
   let pagesRetrieved = 0;
@@ -92,21 +105,25 @@ export async function getStationSchedules(
       );
     }
 
+
     const json: {
       data: MBTASchedule[];
-      included?: MBTATrip[];
+      included?: Array<MBTATrip | MBTAPrediction>;
       links?: {
         next?: string | null;
       };
     } = await response.json();
 
+
     for (const schedule of json.data) {
       scheduleMap.set(schedule.id, schedule);
     }
 
-    for (const trip of json.included ?? []) {
-      if (trip.type === 'trip') {
-        tripMap.set(trip.id, trip);
+    for (const resource of json.included ?? []) {
+      if (resource.type === 'trip') {
+        tripMap.set(resource.id, resource);
+      } else if (resource.type === 'prediction') {
+        predictionMap.set(resource.id, resource);
       }
     }
 
@@ -119,38 +136,59 @@ export async function getStationSchedules(
       : null;
   }
 
+
+
+
   return {
     schedules: [...scheduleMap.values()],
-    trips: [...tripMap.values()]
+    trips: [...tripMap.values()],
+    predictions: [...predictionMap.values()]
   };
+
 }
 
 /**
  * A train serving both selected stations.
  */
+
 export interface MatchedTrain {
   tripId: string;
   trainNumber: string;
+  directionId: 0 | 1;
   departure: MBTASchedule;
   arrival: MBTASchedule;
 }
+
+export interface TrainLookupResult {
+  trains: MatchedTrain[];
+  departurePredictions: MBTAPrediction[];
+  arrivalPredictions: MBTAPrediction[];
+}
+
 
 /**
  * Find trains traveling between two stations.
  *
  * This works for both inbound and outbound service.
  */
-async function getTrainsBetween(
+
+
+export async function getTrainLookup(
   originStopId: string,
   destinationStopId: string,
-  directionId: number,
-  date: string
-): Promise<MatchedTrain[]> {
+  directionId: number | null,
+  date: string,
+  routeId: string = FRANKLIN_ROUTE_ID
+): Promise<TrainLookupResult> {
+
+
+
 
   const [originData, destinationData] = await Promise.all([
-    getStationSchedules(originStopId, date),
-    getStationSchedules(destinationStopId, date)
+    getStationSchedules(originStopId, date, routeId),
+    getStationSchedules(destinationStopId, date, routeId)
   ]);
+
 
   // Create a lookup of trips by their internal IDs.
   const tripMap = new Map<string, MBTATrip>();
@@ -185,9 +223,20 @@ async function getTrainsBetween(
       continue;
     }
 
-    if (attributes.direction_id !== directionId) {
+    // Only accept standard MBTA direction identifiers.
+    if (
+      attributes.direction_id !== 0 &&
+      attributes.direction_id !== 1
+    ) {
       continue;
     }
+    if (
+      directionId !== null &&
+      attributes.direction_id !== directionId
+    ) {
+      continue;
+    }
+
 
     if (attributes.pickup_type !== REGULAR_BOARDING) {
       continue;
@@ -217,8 +266,13 @@ async function getTrainsBetween(
       }
 
       return (
-        a.direction_id === directionId &&
-        a.drop_off_type === REGULAR_DROP_OFF &&
+
+        a.direction_id === attributes.direction_id &&
+
+
+        (a.drop_off_type === REGULAR_DROP_OFF ||
+          a.drop_off_type === FLAG_STOP_DROP_OFF) &&
+
         a.stop_sequence > attributes.stop_sequence &&
         new Date(a.arrival_time).getTime() > departureTime
       );
@@ -229,21 +283,48 @@ async function getTrainsBetween(
     }
 
     if (!matched.has(tripId)) {
+
       matched.set(tripId, {
         tripId,
         trainNumber: trip.attributes.name,
+        directionId: attributes.direction_id as 0 | 1,
         departure,
         arrival: destination
       });
+
     }
   }
 
-  return [...matched.values()].sort((a, b) => {
-    const timeA = a.departure.attributes.departure_time ?? '';
-    const timeB = b.departure.attributes.departure_time ?? '';
 
-    return timeA.localeCompare(timeB);
-  });
+  return {
+    trains: [...matched.values()].sort((a, b) => {
+      const timeA = a.departure.attributes.departure_time ?? '';
+      const timeB = b.departure.attributes.departure_time ?? '';
+
+      return timeA.localeCompare(timeB);
+    }),
+    departurePredictions: originData.predictions,
+    arrivalPredictions: destinationData.predictions
+  };
+
+}
+
+export async function getTrainsBetween(
+  originStopId: string,
+  destinationStopId: string,
+  directionId: number | null,
+  date: string,
+  routeId: string = FRANKLIN_ROUTE_ID
+): Promise<MatchedTrain[]> {
+  const result = await getTrainLookup(
+    originStopId,
+    destinationStopId,
+    directionId,
+    date,
+    routeId
+  );
+
+  return result.trains;
 }
 
 /**

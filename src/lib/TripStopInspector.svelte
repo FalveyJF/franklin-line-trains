@@ -9,7 +9,7 @@
         getCommuteJourneyStopIdsWithParents,
     } from "#lib/journey-stops.ts";
 
-    import { getFranklinAlerts } from "#lib/api/alerts.ts";
+    import { getCommuterRailAlerts } from "#lib/api/alerts.ts";
 
     import {
         getMatchingJourneyStopIds,
@@ -46,8 +46,10 @@
     import { getScheduleBasedAlertSummaries } from "#lib/schedule-alerts.ts";
 
     let {
+        routeId,
         trains,
     }: {
+        routeId: string;
         trains: TrainWithPredictions[];
     } = $props();
 
@@ -147,7 +149,7 @@
                 ]);
 
                 // Use the real Franklin Line alerts.
-                const timingAlerts = await getFranklinAlerts();
+                const timingAlerts = await getCommuterRailAlerts(routeId);
 
                 console.table(
                     timingAlerts.map((alert) => ({
@@ -205,7 +207,8 @@
                     stationInfos,
                 );
 
-                const alertsForExpandedTest = await getFranklinAlerts();
+                const alertsForExpandedTest =
+                    await getCommuterRailAlerts(routeId);
 
                 console.table(
                     alertsForExpandedTest.map((alert) => ({
@@ -441,7 +444,7 @@
 
             // Test the known MBTA alerts against this
             // train's actual commute journey.
-            const alerts = await getFranklinAlerts();
+            const alerts = await getCommuterRailAlerts(routeId);
 
             const directionId = 0; // Outbound test
 

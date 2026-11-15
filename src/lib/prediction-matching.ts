@@ -25,23 +25,35 @@ export interface TrainWithPredictions {
  *
  * Both trip ID and stop sequence must match.
  */
-export function findStopPrediction(
-  predictions: MBTAPrediction[],
-  tripId: string,
-  stopSequence: number
-): MBTAPrediction | null {
-  return (
-    predictions.find((prediction) => {
-      const predictionTripId =
-        prediction.relationships.trip.data?.id;
 
-      return (
-        predictionTripId === tripId &&
+export function findStopPrediction(
+    predictions: MBTAPrediction[],
+    tripId: string,
+    stopSequence: number
+): MBTAPrediction | null {
+    // First, prefer an exact trip and stop-sequence match.
+    const exactMatch = predictions.find((prediction) =>
+        prediction.relationships.trip.data?.id === tripId &&
         prediction.attributes.stop_sequence === stopSequence
-      );
-    }) ?? null
-  );
+    );
+
+    if (exactMatch) {
+        return exactMatch;
+    }
+
+    // The caller retrieved predictions for one station.
+    // If exactly one prediction references this trip,
+    // accept it even if its stop sequence differs.
+    const tripMatches = predictions.filter(
+        (prediction) =>
+            prediction.relationships.trip.data?.id === tripId
+    );
+
+    return tripMatches.length === 1
+        ? tripMatches[0]
+        : null;
 }
+
 
 /**
  * Combine scheduled trains with available predictions.
