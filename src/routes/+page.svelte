@@ -1024,7 +1024,7 @@
 </script>
 
 <svelte:head>
-    <title>Franklin Line Trains</title>
+    <title>Commuter Rail Trains</title>
     <meta
         name="description"
         content="MBTA Franklin Line commuter rail schedules and predictions."
@@ -1033,7 +1033,7 @@
 
 <main>
     <header>
-        <h1>Franklin Line Trains</h1>
+        <h1>Commuter Rail Trains</h1>
         <p class="subtitle">MBTA Franklin/Foxboro Line</p>
     </header>
 
