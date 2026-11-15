@@ -1093,7 +1093,7 @@
     {/key}
 
     <section class="schedule-section">
-        <h2>Train Direction</h2>
+        <!-- <h2>Train Direction</h2>
 
         <div class="direction-buttons">
             <button
@@ -1115,7 +1115,7 @@
             >
                 Outbound
             </button>
-        </div>
+        </div> -->
 
         <div class="route-description">
             <strong>{originName}</strong>
@@ -1268,6 +1268,12 @@
                                         </span>
                                     {/if}
                                 </div>
+
+                                {#if item.train.vehicleLabel}
+                                    <span class="duration">
+                                        Vehicle:{item.train.vehicleLabel}
+                                    </span>
+                                {/if}
 
                                 <span class="direction-label">
                                     {direction === "inbound"

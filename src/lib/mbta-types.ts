@@ -76,3 +76,31 @@ export interface MBTAPrediction {
 export interface MBTACollection<T> {
   data: T[];
 }
+
+export interface MBTAVehicle {
+    id: string;
+    type: "vehicle";
+    attributes: {
+        label: string | null;
+        current_status: string | null;
+        latitude: number | null;
+        longitude: number | null;
+        speed: number | null;
+        updated_at: string | null;
+        carriages: unknown[];
+    };
+    relationships: {
+        trip: {
+            data: {
+                id: string;
+                type: "trip";
+            } | null;
+        };
+        stop: {
+            data: {
+                id: string;
+                type: "stop";
+            } | null;
+        };
+    };
+}

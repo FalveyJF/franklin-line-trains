@@ -2,7 +2,8 @@ import type {
   MBTARoute,
   MBTASchedule,
   MBTATrip,
-  MBTAPrediction
+  MBTAPrediction,
+  MBTAVehicle
 } from '#lib/mbta-types.ts';
 
 const MBTA_API_BASE = 'https://api-v3.mbta.com';
@@ -50,6 +51,7 @@ export interface StationScheduleData {
   schedules: MBTASchedule[];
   trips: MBTATrip[];
   predictions: MBTAPrediction[];
+  vehicles: MBTAVehicle[];
 }
 
 
@@ -69,14 +71,16 @@ export async function getStationSchedules(
   url.searchParams.set('filter[stop]', stopId);
   url.searchParams.set('filter[date]', date);
 
-  url.searchParams.set('include', 'trip,prediction');
+
+  url.searchParams.set('include', 'trip,prediction.vehicle');
+
 
   url.searchParams.set('page[limit]', String(PAGE_SIZE));
 
   const scheduleMap = new Map<string, MBTASchedule>();
   const tripMap = new Map<string, MBTATrip>();
   const predictionMap = new Map<string, MBTAPrediction>();
-
+  const vehicleMap = new Map<string, MBTAVehicle>();
 
   let nextUrl: string | null = url.toString();
   let pagesRetrieved = 0;
@@ -108,7 +112,7 @@ export async function getStationSchedules(
 
     const json: {
       data: MBTASchedule[];
-      included?: Array<MBTATrip | MBTAPrediction>;
+      included?: Array<MBTATrip | MBTAPrediction | MBTAVehicle>;
       links?: {
         next?: string | null;
       };
@@ -119,13 +123,17 @@ export async function getStationSchedules(
       scheduleMap.set(schedule.id, schedule);
     }
 
+
     for (const resource of json.included ?? []) {
       if (resource.type === 'trip') {
         tripMap.set(resource.id, resource);
       } else if (resource.type === 'prediction') {
         predictionMap.set(resource.id, resource);
+      } else if (resource.type === 'vehicle') {
+        vehicleMap.set(resource.id, resource);
       }
     }
+
 
     pagesRetrieved++;
 
@@ -139,11 +147,14 @@ export async function getStationSchedules(
 
 
 
+
   return {
     schedules: [...scheduleMap.values()],
     trips: [...tripMap.values()],
-    predictions: [...predictionMap.values()]
+    predictions: [...predictionMap.values()],
+    vehicles: [...vehicleMap.values()]
   };
+
 
 }
 
@@ -155,6 +166,7 @@ export interface MatchedTrain {
   tripId: string;
   trainNumber: string;
   directionId: 0 | 1;
+  vehicleLabel: string | null;
   departure: MBTASchedule;
   arrival: MBTASchedule;
 }
@@ -195,6 +207,19 @@ export async function getTrainLookup(
 
   for (const trip of originData.trips) {
     tripMap.set(trip.id, trip);
+  }
+
+  const vehicleByTrip = new Map<string, MBTAVehicle>();
+
+  for (const vehicle of [
+    ...originData.vehicles,
+    ...destinationData.vehicles
+  ]) {
+    const tripId = vehicle.relationships.trip.data?.id;
+
+    if (tripId) {
+      vehicleByTrip.set(tripId, vehicle);
+    }
   }
 
   // Group destination stops by their trip IDs.
@@ -284,13 +309,16 @@ export async function getTrainLookup(
 
     if (!matched.has(tripId)) {
 
+
       matched.set(tripId, {
         tripId,
         trainNumber: trip.attributes.name,
         directionId: attributes.direction_id as 0 | 1,
+        vehicleLabel: vehicleByTrip.get(tripId)?.attributes.label ?? null,
         departure,
         arrival: destination
       });
+
 
     }
   }
